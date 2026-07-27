@@ -1,0 +1,17 @@
+{
+  "name": "claude-dispatch",
+  "version": "0.1.0",
+  "description": "Ragiona in Claude Desktop, esegui in Claude Code. Server MCP che delega il lavoro sul progetto reale senza copiare e incollare prompt.",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": ["mcp", "claude-code", "claude-desktop", "model-context-protocol"],
+  "author": "Alessandro Barrafato",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
+  }
+}
