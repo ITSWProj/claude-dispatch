@@ -112,6 +112,7 @@ function pulisciJobVecchi() {
  * un id (stringa), non un oggetto.
  */
 function avviaClaude(prompt, cwd, sessionId) {
+  if (!existsSync(cwd)) throw new Error(`Directory inesistente: ${cwd}`);
   pulisciJobVecchi();
 
   const id = randomUUID();
@@ -190,7 +191,9 @@ function avviaClaude(prompt, cwd, sessionId) {
   // Il prompt viaggia su stdin, non come argomento: è testo lungo, pieno di
   // virgolette e a capo, e qualunque escaping per la riga di comando sarebbe
   // fragile. Su stdin la shell non lo tocca nemmeno.
+  child.stdin.on("error", () => {});
   child.stdin.write(prompt);
+  child.stdin.end();  
 
   // end() NON è facoltativo: chiudere lo stream è ciò che segnala "messaggio
   // finito, tocca a te". Senza, claude resta in attesa di altro input per
@@ -290,16 +293,12 @@ server.registerTool(
   // I parametri arrivano GIÀ VALIDATI da Zod: se il tipo non corrisponde, la
   // chiamata è respinta prima di entrare qui. Nessun controllo manuale necessario.
   async ({ prompt, cwd, session_id }) => {
-    if (!existsSync(cwd)) {
-      return {
-        content: [{ type: "text", text: `Directory inesistente: ${cwd}` }],
-        isError: true,
-      };
+    try {
+      const id = avviaClaude(prompt, cwd, session_id);
+      return { content: [{ type: "text", text: `Avviato. job_id: ${id}` }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: err.message }], isError: true };
     }
-    const id = avviaClaude(prompt, cwd, session_id);
-    return {
-      content: [{ type: "text", text: `Avviato. job_id: ${id}` }],
-    };
   }
 );
 
@@ -365,7 +364,8 @@ server.registerTool(
     // Se il job finisce in 5s si prosegue a 5s; se ci mette mezz'ora si prosegue
     // comunque allo scadere di hold_ms, riportando "in corso".
     // Nessun polling, nessun setInterval, nessuna euristica sul "sembra fermo".
-    await Promise.race([job.donePromise, sleep(hold_ms ?? 30000)]);
+    const attesa = Math.min(hold_ms ?? 30000, 60000);
+    await Promise.race([job.donePromise, sleep(attesa)]);
 
     // Per un job concluso la durata è avvio -> fine. Usare Date.now() anche in
     // quel caso gonfierebbe il numero a ogni successiva chiamata su un job vecchio.
