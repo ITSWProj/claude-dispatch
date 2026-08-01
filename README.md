@@ -1,4 +1,4 @@
-# code-dispatch
+# claude-dispatch
 
 Server MCP che espone Claude Code a Claude Desktop, per lavorare su un progetto senza copiare e incollare prompt tra le due applicazioni.
 
@@ -27,8 +27,8 @@ Cosa fa e cosa non fa:
 ## Installazione
 
 ```bash
-git clone https://github.com/<utente>/code-dispatch.git
-cd code-dispatch
+git clone https://github.com/ITSWProj/claude-dispatch.git
+cd claude-dispatch
 npm install
 ```
 
@@ -47,9 +47,9 @@ Aggiungi il server a `%APPDATA%\Claude\claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "code-dispatch": {
+    "claude-dispatch": {
       "command": "C:\\percorso\\a\\node.exe",
-      "args": ["C:\\percorso\\a\\code-dispatch\\server.js"]
+      "args": ["C:\\percorso\\a\\claude-dispatch\\server.js"]
     }
   }
 }
@@ -65,13 +65,15 @@ Poi chiudi Claude Desktop completamente — anche dall'area di notifica — e ri
 
 Se non compare nulla, il sospetto numero uno è il JSON: una virgola di troppo disattiva silenziosamente *tutti* i server, senza messaggi. Passalo da un validatore.
 
+Lo stderr del server (dove finiscono i `console.error()`) è in `%APPDATA%\Claude\logs\mcp-server-claude-dispatch.log`: se il processo muore all'avvio, il motivo è scritto lì.
+
 ## Strumenti
 
 | Strumento | Uso |
 |---|---|
 | `claude_run` | Esegue un prompt e attende la risposta. Per compiti brevi. |
 | `claude_start` | Avvia un lavoro in background, ritorna subito un `job_id`. |
-| `claude_wait` | Attende un job avviato; se non è pronto entro `hold_ms` riporta "in corso". |
+| `claude_wait` | Attende un job avviato; se non è pronto entro `hold_ms` (default 30s, massimo 60s) riporta "in corso". |
 | `claude_kill` | Termina un job e tutti i suoi processi figli. |
 
 ### Quale usare
@@ -79,6 +81,8 @@ Se non compare nulla, il sospetto numero uno è il JSON: una virgola di troppo d
 Il discriminante è il tempo. Una domanda circoscritta — "leggi questi file e spiegami come funziona X" — sta bene in `claude_run`. Un lavoro vero — refactoring, implementazione, esplorazione di un'area sconosciuta — va con `claude_start`, poi `claude_wait` finché non è pronto.
 
 `claude_run` ha un timeout (default 120s) perché una chiamata sincrona che non ritorna blocca la conversazione. `claude_start` non ne ha: il tetto sta sull'*attesa*, non sul lavoro.
+
+Anche quell'attesa però è limitata: `hold_ms` viene tagliato a 60 secondi. Passare valori più alti non allunga l'attesa — semplicemente si richiama `claude_wait` con lo stesso `job_id` finché il lavoro non è concluso. È un vincolo voluto: `hold_ms` lo sceglie il modello, e senza tetto una singola chiamata potrebbe bloccare la conversazione per minuti.
 
 ### Il `session_id` conta
 
@@ -89,6 +93,7 @@ Non è un dettaglio: la prima invocazione su un progetto di medie dimensioni pu�
 ## Limiti noti
 
 - **Lo stato vive in memoria.** Riavviando Claude Desktop mentre un lavoro gira, il processo continua ma il `job_id` diventa irraggiungibile. Non riavviare durante i lavori lunghi.
+- **Il timeout di `claude_run` uccide l'intero albero di processi**, agente incluso, e il lavoro parziale non è recuperabile. Se il compito potrebbe essere lungo, usa `claude_start`: lì il tempo non è un vincolo.
 - **Solo Windows.** Per portarlo altrove: `claude` al posto di `claude.cmd`, `shell: true` non più necessario, e `kill(-pid)` con `detached: true` al posto di `taskkill`.
 - **La prima invocazione su un progetto è la più lenta.** Sembra un blocco, non lo è.
 - **Nessun limite di spesa.** Il server non impone tetti di costo o di turni. Se servono, si passano a Claude Code con `--max-turns`.
@@ -102,6 +107,8 @@ Da qui discende la regola più importante per chi mette mano al codice: **mai `c
 L'asincronia è gestita con `Promise.race` tra la fine del lavoro e un timer: nessun polling, nessuna euristica sul "sembra fermo". I job vivono in una `Map` con pulizia opportunistica dei conclusi da oltre dieci minuti.
 
 Il prompt viaggia su **stdin**, non come argomento della riga di comando: è testo lungo e pieno di caratteri speciali, e qualunque escaping per la shell sarebbe fragile.
+
+Uccidere un processo lanciato con `shell: true` richiede `taskkill /T`: la catena reale è `cmd.exe → claude.cmd → node → agente`, e terminare solo il primo lascerebbe l'agente vivo a consumare token senza più essere raggiungibile.
 
 Il codice è commentato in dettaglio, con il *perché* di ogni scelta non ovvia.
 
