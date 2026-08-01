@@ -1,5 +1,5 @@
 /**
- * code-dispatch — server MCP che espone Claude Code a Claude Desktop.
+ * claude-dispatch — server MCP che espone Claude Code a Claude Desktop.
  *
  * COS'È UN SERVER MCP STDIO
  * Non è un servizio in ascolto su una porta: è un processo figlio.
@@ -51,6 +51,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** Da quanto un job deve essere concluso prima di essere rimosso dal registro. */
 const RETENZIONE_MS = 10 * 60 * 1000;
+
+/** Tetto massimo all'attesa di claude_wait: il valore lo sceglie il modello. */
+const ATTESA_MAX_MS = 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // UTILITÀ DI PROCESSO
@@ -110,6 +113,10 @@ function pulisciJobVecchi() {
  * Contratto opposto a eseguiClaude(): quella attende e ritorna il risultato,
  * questa non attende e ritorna una maniglia. Da qui la differenza di ritorno:
  * un id (stringa), non un oggetto.
+ *
+ * Il controllo su cwd sta qui e non nell'handler dello strumento, per stare allo
+ * stesso livello di eseguiClaude(): chi un domani aggiunge un'allowlist di
+ * directory trova un unico punto per funzione dove metterla.
  */
 function avviaClaude(prompt, cwd, sessionId) {
   if (!existsSync(cwd)) throw new Error(`Directory inesistente: ${cwd}`);
@@ -188,12 +195,15 @@ function avviaClaude(prompt, cwd, sessionId) {
     });
   });
 
+  // Un 'error' non gestito su uno stream fa throw e porta giù l'INTERO processo
+  // MCP, non solo questo job. Tipicamente EPIPE: il figlio è morto prima che
+  // finissimo di scrivere. Non serve reagire — lo stato reale arriva da 'close'.
+  child.stdin.on("error", () => {});
+
   // Il prompt viaggia su stdin, non come argomento: è testo lungo, pieno di
   // virgolette e a capo, e qualunque escaping per la riga di comando sarebbe
   // fragile. Su stdin la shell non lo tocca nemmeno.
-  child.stdin.on("error", () => {});
   child.stdin.write(prompt);
-  child.stdin.end();  
 
   // end() NON è facoltativo: chiudere lo stream è ciò che segnala "messaggio
   // finito, tocca a te". Senza, claude resta in attesa di altro input per
@@ -218,7 +228,7 @@ function eseguiClaude(prompt, cwd, sessionId, timeoutMs = 120000) {
     if (!existsSync(cwd)) {
       return reject(new Error(`Directory inesistente: ${cwd}`));
     }
-    
+
     const args = ["-p", "--output-format", "json"];
     if (sessionId) args.push("--resume", sessionId);
 
@@ -227,7 +237,19 @@ function eseguiClaude(prompt, cwd, sessionId, timeoutMs = 120000) {
     let stdout = "";
     let stderr = "";
 
-    const timer = setTimeout(async () => {      
+    // Stesso principio del flag job.ucciso in claude_kill: chi reagisce a un
+    // evento deve poter sapere che l'evento è stato provocato di proposito.
+    // Qui serve perché uccidendo il processo scatta "close" con codice != 0,
+    // il cui reject arriverebbe PRIMA del nostro — e una Promise si risolve
+    // una volta sola. Senza il flag, un timeout verrebbe riportato come
+    // "Exit 1", cioè come un crash di Claude Code che non è mai avvenuto.
+    let scaduto = false;
+
+    const timer = setTimeout(async () => {
+      scaduto = true;
+      // Non child.kill(): con shell:true `child` è cmd.exe, e ucciderlo
+      // lascerebbe in vita l'agente sottostante — che continuerebbe a lavorare
+      // e a consumare token. Qui non c'è nemmeno un job_id per riprenderlo.
       await uccidiAlbero(child.pid);
       reject(new Error(`Timeout dopo ${timeoutMs / 1000}s`));
     }, timeoutMs);
@@ -241,6 +263,7 @@ function eseguiClaude(prompt, cwd, sessionId, timeoutMs = 120000) {
 
     child.on("close", (code) => {
       clearTimeout(timer);
+      if (scaduto) return; // il reject corretto lo emette il timer
       if (code !== 0) return reject(new Error(`Exit ${code}: ${stderr}`));
       try {
         resolve(JSON.parse(stdout));
@@ -249,6 +272,9 @@ function eseguiClaude(prompt, cwd, sessionId, timeoutMs = 120000) {
       }
     });
 
+    // Vedi avviaClaude(): senza questo handler un EPIPE su stdin abbatte il
+    // server MCP intero.
+    child.stdin.on("error", () => {});
     child.stdin.write(prompt);
     child.stdin.end();
   });
@@ -259,7 +285,7 @@ function eseguiClaude(prompt, cwd, sessionId, timeoutMs = 120000) {
 // ---------------------------------------------------------------------------
 
 const server = new McpServer({
-  name: "code-dispatch",
+  name: "claude-dispatch",
   version: "0.1.0",
 });
 
@@ -344,7 +370,7 @@ server.registerTool(
       "e va richiamato di nuovo con lo stesso job_id.",
     inputSchema: {
       job_id: z.string().describe("ID restituito da claude_start"),
-      hold_ms: z.number().optional().describe("Quanto attendere prima di rispondere comunque (default 30000)"),
+      hold_ms: z.number().optional().describe("Quanto attendere prima di rispondere comunque (default 30000, massimo 60000)"),
     },
   },
   async ({ job_id, hold_ms }) => {
@@ -362,9 +388,12 @@ server.registerTool(
     // IL CUORE DEL PATTERN.
     // Due promesse in gara: la fine del lavoro e un timer. Vince la più veloce.
     // Se il job finisce in 5s si prosegue a 5s; se ci mette mezz'ora si prosegue
-    // comunque allo scadere di hold_ms, riportando "in corso".
+    // comunque allo scadere dell'attesa, riportando "in corso".
     // Nessun polling, nessun setInterval, nessuna euristica sul "sembra fermo".
-    const attesa = Math.min(hold_ms ?? 30000, 60000);
+    //
+    // Il tetto serve perché hold_ms lo decide il modello: senza, una singola
+    // chiamata potrebbe tenere la conversazione bloccata per minuti.
+    const attesa = Math.min(hold_ms ?? 30000, ATTESA_MAX_MS);
     await Promise.race([job.donePromise, sleep(attesa)]);
 
     // Per un job concluso la durata è avvio -> fine. Usare Date.now() anche in
@@ -430,6 +459,7 @@ server.registerTool(
     // essere stato eseguito: lo troverebbe undefined e il messaggio finale
     // sarebbe corretto solo a volte. Regola generale: se un flag serve a chi
     // reagisce a un evento, scrivilo prima di provocare l'evento.
+    // (Stesso principio del flag `scaduto` in eseguiClaude.)
     job.ucciso = true;
     await uccidiAlbero(job.child.pid);
 
