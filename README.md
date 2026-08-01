@@ -19,7 +19,7 @@ Cosa fa e cosa non fa:
 
 ## Requisiti
 
-- Windows (usa `claude.cmd` e `taskkill`; su Linux/macOS vanno adattati)
+- Windows, Linux o macOS
 - Node.js 18+ — testato su 22
 - [Claude Code](https://claude.com/claude-code) installato e autenticato
 - Claude Desktop
@@ -42,7 +42,15 @@ Deve restare appeso in silenzio, senza stampare nulla: sta aspettando input su s
 
 ## Configurazione
 
-Aggiungi il server a `%APPDATA%\Claude\claude_desktop_config.json`:
+Il file di configurazione di Claude Desktop è:
+
+| Sistema | Percorso |
+|---|---|
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Linux | `~/.config/Claude/claude_desktop_config.json` |
+
+**Windows:**
 
 ```json
 {
@@ -55,17 +63,30 @@ Aggiungi il server a `%APPDATA%\Claude\claude_desktop_config.json`:
 }
 ```
 
+**macOS / Linux:**
+
+```json
+{
+  "mcpServers": {
+    "claude-dispatch": {
+      "command": "/percorso/assoluto/a/node",
+      "args": ["/percorso/assoluto/a/claude-dispatch/server.js"]
+    }
+  }
+}
+```
+
 Tre punti dove si sbaglia facilmente:
 
-- **Percorso assoluto a `node.exe`**, non la parola `node`. Claude Desktop non eredita il PATH della shell. Se usi nvm, punta all'eseguibile della versione specifica (es. `C:\nvm4w\v22.20.0\node.exe`), non alla junction `nodejs\`, che cambia a ogni `nvm use`.
-- **Backslash raddoppiati** nel JSON, oppure slash normali (`C:/percorso/...`), che Node accetta anche su Windows.
-- **Percorso assoluto anche in `args`**: il processo viene avviato con una working directory indefinita, quindi `./server.js` non risolve.
+- **Percorso assoluto all'eseguibile di Node**, non la parola `node`. Claude Desktop non eredita il PATH della shell. Se usi nvm, punta all'eseguibile della versione specifica (`C:\nvm4w\v22.20.0\node.exe` su Windows, `~/.nvm/versions/node/v22.20.0/bin/node` su Unix), non alla junction o al symlink `current`, che cambiano a ogni `nvm use`. Per trovarlo: `where node` su Windows, `which node` su Unix.
+- **Su Windows, backslash raddoppiati** nel JSON, oppure slash normali (`C:/percorso/...`), che Node accetta anche lì.
+- **Percorso assoluto anche in `args`**: il processo viene avviato con una working directory indefinita, quindi `./server.js` non risolve. Su Unix nemmeno `~` viene espanso — quella è una funzione della shell, e qui la shell non c'è.
 
-Poi chiudi Claude Desktop completamente — anche dall'area di notifica — e riavvialo. La configurazione si legge solo all'avvio.
+Poi chiudi Claude Desktop completamente — su Windows anche dall'area di notifica, su macOS con `Cmd+Q` e non con la X — e riavvialo. La configurazione si legge solo all'avvio.
 
 Se non compare nulla, il sospetto numero uno è il JSON: una virgola di troppo disattiva silenziosamente *tutti* i server, senza messaggi. Passalo da un validatore.
 
-Lo stderr del server (dove finiscono i `console.error()`) è in `%APPDATA%\Claude\logs\mcp-server-claude-dispatch.log`: se il processo muore all'avvio, il motivo è scritto lì.
+Lo stderr del server (dove finiscono i `console.error()`) è nel file `mcp-server-claude-dispatch.log`, nella cartella `logs/` accanto al file di configurazione. Se il processo muore all'avvio, il motivo è scritto lì.
 
 ## Strumenti
 
@@ -93,8 +114,8 @@ Non è un dettaglio: la prima invocazione su un progetto di medie dimensioni pu�
 ## Limiti noti
 
 - **Lo stato vive in memoria.** Riavviando Claude Desktop mentre un lavoro gira, il processo continua ma il `job_id` diventa irraggiungibile. Non riavviare durante i lavori lunghi.
+- **I job in background sopravvivono alla chiusura del client.** Su tutte le piattaforme: se hai chiuso Claude Desktop con lavori in corso, quei processi restano vivi e vanno terminati a mano (Gestione attività su Windows, `pkill -f "claude -p"` su Unix).
 - **Il timeout di `claude_run` uccide l'intero albero di processi**, agente incluso, e il lavoro parziale non è recuperabile. Se il compito potrebbe essere lungo, usa `claude_start`: lì il tempo non è un vincolo.
-- **Solo Windows.** Per portarlo altrove: `claude` al posto di `claude.cmd`, `shell: true` non più necessario, e `kill(-pid)` con `detached: true` al posto di `taskkill`.
 - **La prima invocazione su un progetto è la più lenta.** Sembra un blocco, non lo è.
 - **Nessun limite di spesa.** Il server non impone tetti di costo o di turni. Se servono, si passano a Claude Code con `--max-turns`.
 
@@ -108,7 +129,13 @@ L'asincronia è gestita con `Promise.race` tra la fine del lavoro e un timer: ne
 
 Il prompt viaggia su **stdin**, non come argomento della riga di comando: è testo lungo e pieno di caratteri speciali, e qualunque escaping per la shell sarebbe fragile.
 
-Uccidere un processo lanciato con `shell: true` richiede `taskkill /T`: la catena reale è `cmd.exe → claude.cmd → node → agente`, e terminare solo il primo lascerebbe l'agente vivo a consumare token senza più essere raggiungibile.
+### Le differenze di piattaforma
+
+Il file è unico: le differenze sono decise a runtime da `process.platform` e concentrate in tre costanti più un ramo in `uccidiAlbero()`.
+
+Il nodo è che il processo restituito da `spawn()` non è mai l'agente, ma il primo anello di una catena — `cmd.exe → claude.cmd → node → agente` su Windows, `claude → node → agente` su Unix. Terminare solo quello lascerebbe l'agente vivo a consumare token senza più essere raggiungibile.
+
+Su Windows serve `shell: true` perché `claude.cmd` è uno script batch che solo cmd.exe sa interpretare, e da lì `taskkill /T /F` per abbattere l'albero. Su Unix la shell non serve — un guadagno anche di sicurezza — e si usa `detached: true`, che rende il figlio capostipite di un process group: da quel momento `process.kill(-pid)` raggiunge l'intero gruppo con un solo segnale. Le due opzioni vanno insieme: senza `detached`, il PID negativo colpirebbe il gruppo del server stesso.
 
 Il codice è commentato in dettaglio, con il *perché* di ogni scelta non ovvia.
 
