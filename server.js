@@ -1,5 +1,5 @@
 /**
- * code-bridge — server MCP che espone Claude Code a Claude Desktop.
+ * code-dispatch — server MCP che espone Claude Code a Claude Desktop.
  *
  * COS'È UN SERVER MCP STDIO
  * Non è un servizio in ascolto su una porta: è un processo figlio.
@@ -256,7 +256,7 @@ function eseguiClaude(prompt, cwd, sessionId, timeoutMs = 120000) {
 // ---------------------------------------------------------------------------
 
 const server = new McpServer({
-  name: "code-bridge",
+  name: "code-dispatch",
   version: "0.1.0",
 });
 
