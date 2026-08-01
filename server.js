@@ -224,8 +224,8 @@ function eseguiClaude(prompt, cwd, sessionId, timeoutMs = 120000) {
     let stdout = "";
     let stderr = "";
 
-    const timer = setTimeout(() => {
-      child.kill();
+    const timer = setTimeout(async () => {      
+      await uccidiAlbero(child.pid);
       reject(new Error(`Timeout dopo ${timeoutMs / 1000}s`));
     }, timeoutMs);
 
