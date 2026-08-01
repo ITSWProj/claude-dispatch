@@ -19,7 +19,7 @@ Cosa fa e cosa non fa:
 
 ## Requisiti
 
-- Windows, Linux o macOS
+- Windows, Linux o macOS — testato su Windows 10/11 e Debian/Kali
 - Node.js 18+ — testato su 22
 - [Claude Code](https://claude.com/claude-code) installato e autenticato
 - Claude Desktop
@@ -138,6 +138,8 @@ Il nodo è che il processo restituito da `spawn()` non è mai l'agente, ma il pr
 Su Windows serve `shell: true` perché `claude.cmd` è uno script batch che solo cmd.exe sa interpretare, e da lì `taskkill /T /F` per abbattere l'albero. Su Unix la shell non serve — un guadagno anche di sicurezza — e si usa `detached: true`, che rende il figlio capostipite di un process group: da quel momento `process.kill(-pid)` raggiunge l'intero gruppo con un solo segnale. Le due opzioni vanno insieme: senza `detached`, il PID negativo colpirebbe il gruppo del server stesso.
 
 Il codice è commentato in dettaglio, con il *perché* di ogni scelta non ovvia.
+
+Entrambi i rami sono stati verificati: su Unix con `ps -eo pid,pgid` (il figlio deve avere PGID uguale al proprio PID, cioè essere capostipite del suo gruppo) e controllando che il kill abbatta l'albero senza toccare il server. macOS non è stato provato direttamente, ma usa lo stesso ramo.
 
 ## Licenza
 
