@@ -30,6 +30,42 @@ import { existsSync } from "node:fs";
 // percorso reale del file compilato. Senza .js, Node non risolve il modulo.
 
 // ---------------------------------------------------------------------------
+// DIFFERENZE DI PIATTAFORMA
+// ---------------------------------------------------------------------------
+
+/**
+ * Tutto ciò che cambia tra Windows e Unix è concentrato qui e in uccidiAlbero().
+ * Il resto del file è identico ovunque.
+ *
+ * Le tre differenze sono legate tra loro, e conviene vederle insieme:
+ *
+ * 1. IL COMANDO. Su Windows l'installazione di Claude Code produce `claude.cmd`,
+ *    uno script batch. Su Unix produce `claude`, uno script con shebang che il
+ *    kernel sa eseguire direttamente.
+ *
+ * 2. COME LANCIARLO. Uno script batch non è un eseguibile: solo cmd.exe lo sa
+ *    interpretare, da cui `shell: true` su Windows. Su Unix non serve — ed è un
+ *    guadagno anche di sicurezza, perché senza shell la command injection non ha
+ *    proprio dove attaccarsi.
+ *
+ * 3. COME UCCIDERLO. Su Windows, passando dalla shell, il processo che otteniamo
+ *    è cmd.exe: i suoi discendenti (claude, node, l'agente) non muoiono con lui,
+ *    e servono le opzioni ad albero di taskkill. Su Unix il problema è lo stesso
+ *    ma la soluzione è nativa: `detached: true` rende il figlio capostipite di un
+ *    process group, e da lì un solo segnale raggiunge tutto il gruppo.
+ *
+ * NOTA SU detached: true — rende il figlio indipendente dal padre, quindi
+ * sopravvive alla chiusura di Claude Desktop. È lo stesso comportamento che si ha
+ * già su Windows (dove i job in corso restano vivi ma senza job_id per
+ * raggiungerli), quindi il port non introduce un limite nuovo: lo pareggia.
+ */
+const isWindows = process.platform === "win32";
+
+const COMANDO_CLAUDE = isWindows ? "claude.cmd" : "claude";
+
+const OPZIONI_SPAWN = isWindows ? { shell: true } : { detached: true };
+
+// ---------------------------------------------------------------------------
 // STATO CONDIVISO
 // ---------------------------------------------------------------------------
 
@@ -62,19 +98,41 @@ const ATTESA_MAX_MS = 60 * 1000;
 /**
  * Termina un processo e TUTTI i suoi discendenti.
  *
- * Perché non basta child.kill(): avendo lanciato con { shell: true }, la catena
- * reale è cmd.exe -> claude.cmd -> node -> agente. Il nostro `child` è cmd.exe,
- * quindi ucciderlo lascerebbe in vita l'agente, che continuerebbe a lavorare e
- * a consumare token senza più essere raggiungibile.
+ * Perché non basta child.kill(): la catena reale è
+ *   Windows: cmd.exe -> claude.cmd -> node -> agente
+ *   Unix:    claude -> node -> agente
+ * In entrambi i casi `child` è solo il primo anello. Ucciderlo lascerebbe in vita
+ * l'agente, che continuerebbe a lavorare e a consumare token senza più essere
+ * raggiungibile.
  *
- * /T = tree (l'intero albero dei figli), /F = force.
+ * WINDOWS — taskkill con /T (tree, l'intero albero dei figli) e /F (force).
  *
- * L'errore è deliberatamente ignorato: se il processo è già morto taskkill
- * fallisce, ed è un fallimento privo di conseguenze.
+ * UNIX — un PID negativo passato a process.kill() indica il PROCESS GROUP invece
+ * del singolo processo. Funziona solo perché abbiamo lanciato con detached: true,
+ * che rende il figlio capostipite di un gruppo suo; senza, -pid colpirebbe il
+ * gruppo del server e ci uccideremmo da soli.
+ *
+ * L'errore è deliberatamente ignorato in entrambi i rami: se il processo è già
+ * morto, taskkill fallisce e process.kill lancia ESRCH. È un fallimento privo di
+ * conseguenze — l'obiettivo (quel processo non deve esistere) è già raggiunto.
  */
 function uccidiAlbero(pid) {
+  if (isWindows) {
+    return new Promise((resolve) => {
+      execFile("taskkill", ["/pid", String(pid), "/T", "/F"], () => resolve());
+    });
+  }
+
+  // Su Unix l'operazione è sincrona: il segnale è consegnato subito. La Promise
+  // esiste solo per mantenere identica la firma nei due rami, così chi chiama
+  // fa await senza sapere su che sistema gira.
   return new Promise((resolve) => {
-    execFile("taskkill", ["/pid", String(pid), "/T", "/F"], () => resolve());
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      // ESRCH: il gruppo non esiste più.
+    }
+    resolve();
   });
 }
 
@@ -131,14 +189,11 @@ function avviaClaude(prompt, cwd, sessionId) {
   const args = ["-p", "--output-format", "json"];
   if (sessionId) args.push("--resume", sessionId);
 
-  // shell: true è NECESSARIO su Windows perché `claude` è un file .cmd, cioè
-  // uno script batch che solo cmd.exe può interpretare — non un eseguibile.
-  //
-  // La shell aprirebbe la porta alla command injection, ma qui non c'è
-  // superficie: gli argomenti sono costanti scritte sopra, e il prompt (l'unico
-  // dato variabile e potenzialmente ostile) non passa dalla riga di comando —
-  // viaggia su stdin, vedi in fondo alla funzione.
-  const child = spawn("claude.cmd", args, { cwd, shell: true });
+  // Su Windows OPZIONI_SPAWN porta shell: true, che aprirebbe la porta alla
+  // command injection. Qui non c'è superficie: gli argomenti sono costanti
+  // scritte sopra, e il prompt (l'unico dato variabile e potenzialmente ostile)
+  // non passa dalla riga di comando — viaggia su stdin, vedi in fondo.
+  const child = spawn(COMANDO_CLAUDE, args, { cwd, ...OPZIONI_SPAWN });
 
   const job = {
     id,
@@ -232,7 +287,7 @@ function eseguiClaude(prompt, cwd, sessionId, timeoutMs = 120000) {
     const args = ["-p", "--output-format", "json"];
     if (sessionId) args.push("--resume", sessionId);
 
-    const child = spawn("claude.cmd", args, { cwd, shell: true });
+    const child = spawn(COMANDO_CLAUDE, args, { cwd, ...OPZIONI_SPAWN });
 
     let stdout = "";
     let stderr = "";
@@ -247,9 +302,10 @@ function eseguiClaude(prompt, cwd, sessionId, timeoutMs = 120000) {
 
     const timer = setTimeout(async () => {
       scaduto = true;
-      // Non child.kill(): con shell:true `child` è cmd.exe, e ucciderlo
-      // lascerebbe in vita l'agente sottostante — che continuerebbe a lavorare
-      // e a consumare token. Qui non c'è nemmeno un job_id per riprenderlo.
+      // Non child.kill(): `child` è solo il primo anello della catena, e
+      // ucciderlo lascerebbe in vita l'agente sottostante — che continuerebbe a
+      // lavorare e a consumare token. Qui non c'è nemmeno un job_id per
+      // riprenderlo.
       await uccidiAlbero(child.pid);
       reject(new Error(`Timeout dopo ${timeoutMs / 1000}s`));
     }, timeoutMs);
@@ -286,7 +342,7 @@ function eseguiClaude(prompt, cwd, sessionId, timeoutMs = 120000) {
 
 const server = new McpServer({
   name: "claude-dispatch",
-  version: "0.1.0",
+  version: "0.2.0",
 });
 
 /**
@@ -463,8 +519,8 @@ server.registerTool(
     job.ucciso = true;
     await uccidiAlbero(job.child.pid);
 
-    // Lo stato non viene forzato a mano: morto cmd.exe scatta "close" con codice
-    // diverso da zero, e la macchina a stati porta il job in "error" da sola.
+    // Lo stato non viene forzato a mano: morto il capostipite scatta "close" con
+    // codice diverso da zero, e la macchina a stati porta il job in "error" da sola.
     return { content: [{ type: "text", text: `Terminato il lavoro ${job_id}.` }] };
   }
 );
