@@ -1,4 +1,4 @@
-# code-bridge
+# code-dispatch
 
 Server MCP che espone Claude Code a Claude Desktop, per lavorare su un progetto senza copiare e incollare prompt tra le due applicazioni.
 
@@ -27,8 +27,8 @@ Cosa fa e cosa non fa:
 ## Installazione
 
 ```bash
-git clone https://github.com/<utente>/code-bridge.git
-cd code-bridge
+git clone https://github.com/<utente>/code-dispatch.git
+cd code-dispatch
 npm install
 ```
 
@@ -47,9 +47,9 @@ Aggiungi il server a `%APPDATA%\Claude\claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "code-bridge": {
+    "code-dispatch": {
       "command": "C:\\percorso\\a\\node.exe",
-      "args": ["C:\\percorso\\a\\code-bridge\\server.js"]
+      "args": ["C:\\percorso\\a\\code-dispatch\\server.js"]
     }
   }
 }
